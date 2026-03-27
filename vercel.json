@@ -1,0 +1,14 @@
+{
+    "rewrites": [
+        {
+            "source": "/(.*)",
+            "destination": "/api/index.py"
+        }
+    ],
+    "env": {
+        "XDG_CACHE_HOME": "/tmp",
+        "TORCH_HOME": "/tmp",
+        "HF_HOME": "/tmp",
+        "MPLCONFIGDIR": "/tmp"
+    }
+}

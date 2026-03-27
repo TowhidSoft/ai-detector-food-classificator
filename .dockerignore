@@ -1,0 +1,15 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.venv
+venv
+.env
+.git
+.gitignore
+.DS_Store
+dataset/
+models/
+*.mp4
+*.mkv
+*.avi

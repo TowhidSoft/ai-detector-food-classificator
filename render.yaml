@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: video-classifier
+    env: docker
+    plan: free
+    autoDeploy: false
+    envVars:
+      - key: PORT
+        value: 8000

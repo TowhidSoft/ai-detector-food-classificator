@@ -1,0 +1,15 @@
+# Virtual environments
+venv/
+.env/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS files
+.DS_Store
+
+# Model weights (optional)
+*.h5
+*.pt
+*.pth
