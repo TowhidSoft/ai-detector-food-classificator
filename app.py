@@ -7,6 +7,14 @@ from open_clip import tokenize
 import tempfile
 import os
 from PIL import Image
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -46,7 +54,7 @@ def get_model():
     if model is not None:
         return model, preprocess, detection_features, meal_features
 
-    print("Loading model...")
+    logger.info("Loading model...")
     global device
     # Create model
     m, _, p = open_clip.create_model_and_transforms(
@@ -56,7 +64,7 @@ def get_model():
     preprocess = p
     
     # Precompute Prompt Features
-    print("Computing prompt features...")
+    logger.info("Computing prompt features...")
     
     # 1. Detection Features
     with torch.no_grad():
@@ -72,7 +80,7 @@ def get_model():
         mf /= mf.norm(dim=-1, keepdim=True)
         meal_features = mf
         
-    print("Model loaded.")
+    logger.info("Model loaded successfully.")
     return model, preprocess, detection_features, meal_features
 
 # ----------------------------
@@ -106,36 +114,46 @@ for key in MEAL_KEYS:
         MEAL_PROMPTS_FLAT.append(prompt)
         MEAL_KEY_INDICES.append(key)
 
-    # Logic moved to get_model()
-    pass
-
 # ----------------------------
 # Video analysis function
 # ----------------------------
-def analyze_video(video_path, frame_interval=30):
+def analyze_video(video_path):
     # Ensure model is loaded
     model, preprocess, detection_features, meal_features = get_model()
     
     cap = cv2.VideoCapture(video_path)
+    # Get video properties
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    duration = total_frames / fps if fps > 0 else 0
     
+    logger.info(f"Analyzing video: {duration:.2f}s, {total_frames} frames, {fps} fps")
+
+    # Default frame interval
+    frame_interval = 30
+    
+    # Adjust frame interval for long videos to avoid Cloudflare/Render timeouts
+    if duration > 120:  # > 2 mins
+        frame_interval = max(int(fps * 2), 60) # 1 frame every 2 seconds
+    elif duration > 30: # > 30s
+        frame_interval = max(int(fps), 30)    # 1 frame per second
+    
+    logger.info(f"Using frame_interval: {frame_interval}")
+
     food_frame_count = 0
     total_analyzed_frames = 0
-    
-    # Accumulate features for meal classification (only for food frames)
     food_frame_features = []
-
-    frame_count = 0
     
-    while True:
+    current_frame = 0
+    while current_frame < total_frames:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
         ret, frame = cap.read()
         if not ret:
             break
 
-        frame_count += 1
-        if frame_count % frame_interval != 0:
-            continue
-
         total_analyzed_frames += 1
+        if total_analyzed_frames % 5 == 0:
+             logger.info(f"Analyzed {total_analyzed_frames} frames (at {current_frame}/{total_frames})...")
 
         # Convert frame to PIL
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -153,15 +171,15 @@ def analyze_video(video_path, frame_interval=30):
             probs = similarity.cpu().numpy()[0]
             
             # Sum prob of all 'Food' prompts vs all 'Not Food' prompts
-            # FOOD_DETECTION_PROMPTS is the first part of the list
             n_food = len(FOOD_DETECTION_PROMPTS)
-            
             prob_food = np.sum(probs[:n_food])
             prob_not_food = np.sum(probs[n_food:])
             
             if prob_food > prob_not_food:
                 food_frame_count += 1
                 food_frame_features.append(image_features)
+        
+        current_frame += frame_interval
 
     cap.release()
     
@@ -171,8 +189,6 @@ def analyze_video(video_path, frame_interval=30):
     # ---------------------------
     # Global Decision
     # ---------------------------
-    # Logic: If more than X% of the analyzed frames are food, it is a food video.
-    # We use a threshold of 15% to catch vlogs where food appears intermittently.
     food_ratio = food_frame_count / total_analyzed_frames
     is_food = food_ratio > 0.15 
     
@@ -180,7 +196,7 @@ def analyze_video(video_path, frame_interval=30):
          return {
             "category": "not_food_content", 
             "is_food": False, 
-            "confidence": round(food_ratio, 3),
+            "confidence": round(float(food_ratio), 3),
             "debug_info": f"Only {food_frame_count}/{total_analyzed_frames} frames detected as food."
         }
 
@@ -188,28 +204,21 @@ def analyze_video(video_path, frame_interval=30):
     # Meal Classification (on food frames only)
     # ---------------------------
     if not food_frame_features:
-        # Fallback if somehow ratio > 15% but list is empty (unlikely)
-        category = "lunch_meal" # Default
+        best_category = "lunch_meal" # Fallback
     else:
         # Average features of CONFIRMED food frames only
-        # This reduces noise from the non-food intro/outro
         avg_food_features = torch.cat(food_frame_features, dim=0).mean(dim=0, keepdim=True)
         avg_food_features /= avg_food_features.norm(dim=-1, keepdim=True)
         
         meal_similarity = (100.0 * avg_food_features @ meal_features.T).softmax(dim=-1)
         meal_probs = meal_similarity.cpu().numpy()[0]
         
-        # We need to aggregate probabilities per Category Key (since we have multiple prompts per key)
-        # e.g. sum(prob) for all breakfast prompts
         category_scores = {k: 0.0 for k in MEAL_KEYS}
-        
         for idx, score in enumerate(meal_probs):
             cat_key = MEAL_KEY_INDICES[idx]
             category_scores[cat_key] += score
             
-        # Find best category
         best_category = max(category_scores, key=category_scores.get)
-        confidence = category_scores[best_category]
 
     # Time logic mapping
     time_mapping = {
@@ -228,27 +237,43 @@ def analyze_video(video_path, frame_interval=30):
     }
 
 # ----------------------------
-# FastAPI endpoint
+# FastAPI endpoints
 # ----------------------------
 @app.get("/")
 def root():
     return {"status": "ok"}
 
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Pre-loading model at startup...")
+    get_model()
+    logger.info("Startup sequence complete.")
+
 @app.get("/health")
 def health():
     return {"status": "alive"}
 
-    
 @app.post("/analyze-video")
 async def analyze_video_api(video: UploadFile = File(...)):
-    # Save uploaded video temporarily
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp:
-        temp.write(await video.read())
-        temp_path = temp.name
-
+    logger.info(f"Received video analysis request for file: {video.filename}")
+    
+    # Save uploaded video temporarily using chunks to avoid memory overflow
     try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp:
+            while chunk := await video.read(1024 * 1024): # 1MB chunks
+                temp.write(chunk)
+            temp_path = temp.name
+        
+        logger.info(f"Video saved to {temp_path}. Starting classification...")
         result = analyze_video(temp_path)
+        logger.info("Analysis finished successfully.")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error during video processing: {str(e)}", exc_info=True)
+        return {"error": "Internal server error during video analysis.", "details": str(e)}
+        
     finally:
-        os.remove(temp_path)
-
-    return result
+        if 'temp_path' in locals() and os.path.exists(temp_path):
+            os.remove(temp_path)
+            logger.info(f"Temporary file {temp_path} removed.")
