@@ -230,6 +230,15 @@ def analyze_video(video_path, frame_interval=30):
 # ----------------------------
 # FastAPI endpoint
 # ----------------------------
+@app.get("/")
+def root():
+    return {"status": "ok"}
+
+@app.get("/health")
+def health():
+    return {"status": "alive"}
+
+    
 @app.post("/analyze-video")
 async def analyze_video_api(video: UploadFile = File(...)):
     # Save uploaded video temporarily
